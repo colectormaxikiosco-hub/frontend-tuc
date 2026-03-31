@@ -93,7 +93,7 @@ const LoginPage = () => {
               Colector de Datos
             </Typography>
             <Typography variant="body2" color="text.secondary" sx={{ fontSize: { xs: "0.813rem", sm: "0.875rem" } }}>
-              Sistema de Gestión de Almacén
+              Colector de datos · Gestión de almacén
             </Typography>
           </Box>
 

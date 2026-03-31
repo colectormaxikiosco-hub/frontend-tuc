@@ -69,7 +69,7 @@ const HomePage = () => {
           Bienvenido, {user?.nombre || user?.username || "Usuario"}
         </Typography>
         <Typography variant="body2" color="text.secondary">
-          Sistema de Colector de Datos - Almacén
+          Maxikiosco Tuc · Colector de datos
         </Typography>
       </Box>
 
