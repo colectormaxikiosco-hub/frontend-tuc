@@ -131,31 +131,29 @@ export const DataProvider = ({ children }) => {
     }
   }
 
-  // Plantillas
+  // Plantillas — tras mutación se vuelve a cargar la lista para mantener consistencia con el servidor
   const addPlantilla = async (plantilla) => {
     try {
-      const newPlantilla = await plantillaService.create(plantilla)
-      setPlantillas([...plantillas, newPlantilla])
+      await plantillaService.create(plantilla)
+      const fresh = await plantillaService.getAll()
+      setPlantillas(fresh)
       showNotification("Plantilla creada exitosamente")
-      return newPlantilla
+      return fresh
     } catch (error) {
       console.error("[v0] Error agregando plantilla:", error)
-      const message = error.response?.data?.message || "Error al crear plantilla"
-      showNotification(message, "error")
       throw error
     }
   }
 
   const updatePlantilla = async (id, data) => {
     try {
-      const updated = await plantillaService.update(id, data)
-      setPlantillas(plantillas.map((p) => (p.id === id ? updated : p)))
+      await plantillaService.update(id, data)
+      const fresh = await plantillaService.getAll()
+      setPlantillas(fresh)
       showNotification("Plantilla actualizada exitosamente")
-      return updated
+      return fresh
     } catch (error) {
       console.error("[v0] Error actualizando plantilla:", error)
-      const message = error.response?.data?.message || "Error al actualizar plantilla"
-      showNotification(message, "error")
       throw error
     }
   }
@@ -163,12 +161,11 @@ export const DataProvider = ({ children }) => {
   const deletePlantilla = async (id) => {
     try {
       await plantillaService.delete(id)
-      setPlantillas(plantillas.filter((p) => p.id !== id))
+      const fresh = await plantillaService.getAll()
+      setPlantillas(fresh)
       showNotification("Plantilla eliminada exitosamente")
     } catch (error) {
       console.error("[v0] Error eliminando plantilla:", error)
-      const message = error.response?.data?.message || "Error al eliminar plantilla"
-      showNotification(message, "error")
       throw error
     }
   }
