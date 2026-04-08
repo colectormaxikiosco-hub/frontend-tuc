@@ -1,9 +1,9 @@
 "use client"
 
-import { useState, useEffect } from "react"
-import { useNavigate, useLocation } from "react-router-dom"
+import { useState, useEffect, useMemo, useCallback, useRef } from "react"
 import { useData } from "../contexts/DataContext"
 import { conteoService } from "../services/conteoService"
+import BarcodeScanner from "../components/BarcodeScanner"
 import {
   Container,
   Typography,
@@ -20,11 +20,17 @@ import {
   Chip,
   LinearProgress,
   Snackbar,
-  Divider,
   Paper,
   TablePagination,
-  FormControlLabel,
   Switch,
+  Stack,
+  Backdrop,
+  CircularProgress,
+  Fab,
+  useMediaQuery,
+  useTheme,
+  InputAdornment,
+  IconButton,
 } from "@mui/material"
 import {
   CheckCircle,
@@ -32,21 +38,42 @@ import {
   TrendingDown,
   CheckCircleOutline,
   Cancel,
-  ExitToApp,
   Search,
   FilterList,
+  QrCodeScanner,
+  PlayArrow,
 } from "@mui/icons-material"
 
 const CONTEO_STORAGE_KEY = "conteo_activo"
 
+const formatApiError = (error) => {
+  const data = error?.response?.data
+  if (!data) return error?.message || "Error de conexión"
+  if (Array.isArray(data.errors) && data.errors.length) {
+    return data.errors.map((e) => e.msg || e.message).join(" · ")
+  }
+  return data.message || "Error al procesar la solicitud"
+}
+
+const calcularDiferencias = (cantidadReal, cantidadSistema) => {
+  const real = Number(cantidadReal) || 0
+  const sistema = Number(cantidadSistema) || 0
+  const diferencia = real - sistema
+  const faltante = diferencia < 0 ? Math.abs(diferencia) : 0
+  const sobrante = diferencia > 0 ? diferencia : 0
+  return { diferencia, faltante, sobrante }
+}
+
 const ConteoPage = () => {
-  const { plantillas, products, refreshData } = useData()
-  const navigate = useNavigate()
-  const location = useLocation()
+  const theme = useTheme()
+  const isXs = useMediaQuery(theme.breakpoints.down("sm"))
+  const { plantillas, refreshData } = useData()
+
   const [selectedPlantilla, setSelectedPlantilla] = useState(null)
   const [conteoActivo, setConteoActivo] = useState(null)
   const [productosConteo, setProductosConteo] = useState([])
   const [searchProducto, setSearchProducto] = useState("")
+  const [debouncedSearch, setDebouncedSearch] = useState("")
   const [mostrarSoloPendientes, setMostrarSoloPendientes] = useState(false)
   const [openCantidadDialog, setOpenCantidadDialog] = useState(false)
   const [productoActual, setProductoActual] = useState(null)
@@ -55,78 +82,89 @@ const ConteoPage = () => {
   const [loading, setLoading] = useState(false)
   const [snackbar, setSnackbar] = useState({ open: false, message: "", severity: "success" })
   const [openExitDialog, setOpenExitDialog] = useState(false)
-  const [pendingNavigation, setPendingNavigation] = useState(null)
   const [searchPlantilla, setSearchPlantilla] = useState("")
   const [pagePlantilla, setPagePlantilla] = useState(0)
-  const [rowsPerPagePlantilla, setRowsPerPagePlantilla] = useState(10)
+  const [rowsPerPagePlantilla, setRowsPerPagePlantilla] = useState(12)
   const [openReminderDialog, setOpenReminderDialog] = useState(false)
   const [plantillaToSelect, setPlantillaToSelect] = useState(null)
   const [isLeavingIntentionally, setIsLeavingIntentionally] = useState(false)
+  const [scannerOpen, setScannerOpen] = useState(false)
+  const [openFinalizeDialog, setOpenFinalizeDialog] = useState(false)
+
+  const cantidadInputRef = useRef(null)
+
+  const showSnackbar = useCallback((message, severity = "success") => {
+    setSnackbar({ open: true, message, severity })
+  }, [])
 
   useEffect(() => {
+    const t = setTimeout(() => setDebouncedSearch(searchProducto), 200)
+    return () => clearTimeout(t)
+  }, [searchProducto])
+
+  useEffect(() => {
+    if (conteoActivo || plantillas.length === 0) return
+
+    const conteoGuardado = localStorage.getItem(CONTEO_STORAGE_KEY)
+    if (!conteoGuardado) return
+
+    let cancelled = false
+
     const restaurarConteo = async () => {
       try {
-        const conteoGuardado = localStorage.getItem(CONTEO_STORAGE_KEY)
-        if (conteoGuardado) {
-          const { conteoId, plantillaId } = JSON.parse(conteoGuardado)
+        const { conteoId, plantillaId } = JSON.parse(conteoGuardado)
+        const plantilla = plantillas.find((p) => Number(p.id) === Number(plantillaId))
+        if (!plantilla) return
 
-          setLoading(true)
+        setLoading(true)
+        const conteoCompleto = await conteoService.getById(conteoId)
 
-          // Obtener el conteo completo desde el backend
-          const conteoCompleto = await conteoService.getById(conteoId)
+        if (cancelled) return
 
-          // Verificar que el conteo siga en progreso
-          if (conteoCompleto.estado === "en_progreso") {
-            // Buscar la plantilla correspondiente
-            const plantilla = plantillas.find((p) => p.id === plantillaId)
-
-            if (plantilla) {
-              setSelectedPlantilla(plantilla)
-              setConteoActivo(conteoCompleto)
-              setProductosConteo(conteoCompleto.productos || [])
-              setIsLeavingIntentionally(false)
-
-              setSnackbar({
-                open: true,
-                message: "Conteo restaurado correctamente",
-                severity: "success",
-              })
-            } else {
-              // Si no se encuentra la plantilla, limpiar localStorage
-              localStorage.removeItem(CONTEO_STORAGE_KEY)
-            }
-          } else {
-            // Si el conteo ya no está en progreso, limpiar localStorage
-            localStorage.removeItem(CONTEO_STORAGE_KEY)
-          }
+        if (conteoCompleto.estado !== "en_progreso") {
+          localStorage.removeItem(CONTEO_STORAGE_KEY)
+          return
         }
+
+        setSelectedPlantilla(plantilla)
+        setConteoActivo(conteoCompleto)
+        setProductosConteo(conteoCompleto.productos || [])
+        setIsLeavingIntentionally(false)
+        showSnackbar("Conteo restaurado", "success")
       } catch (error) {
+        if (cancelled) return
         console.error("Error al restaurar conteo:", error)
-        // Si hay error, limpiar localStorage
         localStorage.removeItem(CONTEO_STORAGE_KEY)
-        setSnackbar({
-          open: true,
-          message: "No se pudo restaurar el conteo anterior",
-          severity: "warning",
-        })
+        showSnackbar(formatApiError(error) || "No se pudo restaurar el conteo", "warning")
       } finally {
-        setLoading(false)
+        if (!cancelled) setLoading(false)
       }
     }
 
-    if (plantillas.length > 0) {
-      restaurarConteo()
+    restaurarConteo()
+    return () => {
+      cancelled = true
     }
-  }, [plantillas])
+  }, [plantillas, conteoActivo, showSnackbar])
+
+  useEffect(() => {
+    if (conteoActivo || plantillas.length === 0) return
+    const raw = localStorage.getItem(CONTEO_STORAGE_KEY)
+    if (!raw) return
+    try {
+      const { plantillaId } = JSON.parse(raw)
+      const existe = plantillas.some((p) => Number(p.id) === Number(plantillaId))
+      if (!existe) localStorage.removeItem(CONTEO_STORAGE_KEY)
+    } catch {
+      localStorage.removeItem(CONTEO_STORAGE_KEY)
+    }
+  }, [plantillas, conteoActivo])
 
   useEffect(() => {
     if (conteoActivo && selectedPlantilla) {
       localStorage.setItem(
         CONTEO_STORAGE_KEY,
-        JSON.stringify({
-          conteoId: conteoActivo.id,
-          plantillaId: selectedPlantilla.id,
-        }),
+        JSON.stringify({ conteoId: conteoActivo.id, plantillaId: selectedPlantilla.id }),
       )
     }
   }, [conteoActivo, selectedPlantilla])
@@ -134,18 +172,13 @@ const ConteoPage = () => {
   useEffect(() => {
     const handleBeforeUnload = (e) => {
       if (conteoActivo && !isLeavingIntentionally) {
-        // Solo mostrar advertencia, NO cancelar el conteo
         e.preventDefault()
-        e.returnValue = "Tiene un conteo en progreso. ¿Está seguro de que desea salir?"
+        e.returnValue = ""
         return e.returnValue
       }
     }
-
     window.addEventListener("beforeunload", handleBeforeUnload)
-
-    return () => {
-      window.removeEventListener("beforeunload", handleBeforeUnload)
-    }
+    return () => window.removeEventListener("beforeunload", handleBeforeUnload)
   }, [conteoActivo, isLeavingIntentionally])
 
   useEffect(() => {
@@ -159,14 +192,20 @@ const ConteoPage = () => {
       }
     }
 
-    // Push current state to enable back button interception
     window.history.pushState(null, "", window.location.pathname)
     window.addEventListener("popstate", handlePopState)
-
-    return () => {
-      window.removeEventListener("popstate", handlePopState)
-    }
+    return () => window.removeEventListener("popstate", handlePopState)
   }, [conteoActivo, isLeavingIntentionally])
+
+  useEffect(() => {
+    if (openCantidadDialog && cantidadInputRef.current) {
+      const id = requestAnimationFrame(() => {
+        cantidadInputRef.current?.focus()
+        cantidadInputRef.current?.select?.()
+      })
+      return () => cancelAnimationFrame(id)
+    }
+  }, [openCantidadDialog])
 
   const handleSelectPlantilla = (plantilla) => {
     setPlantillaToSelect(plantilla)
@@ -188,114 +227,75 @@ const ConteoPage = () => {
 
       localStorage.setItem(
         CONTEO_STORAGE_KEY,
-        JSON.stringify({
-          conteoId: conteoCompleto.id,
-          plantillaId: plantillaToSelect.id,
-        }),
+        JSON.stringify({ conteoId: conteoCompleto.id, plantillaId: plantillaToSelect.id }),
       )
 
-      setSnackbar({
-        open: true,
-        message: "Conteo iniciado correctamente",
-        severity: "success",
-      })
+      showSnackbar("Conteo iniciado", "success")
     } catch (error) {
-      setSnackbar({
-        open: true,
-        message: "Error al iniciar el conteo",
-        severity: "error",
-      })
+      showSnackbar(formatApiError(error), "error")
     } finally {
       setLoading(false)
       setPlantillaToSelect(null)
     }
   }
 
-  const calcularDiferencias = (cantidadReal, cantidadSistema) => {
-    const real = Number(cantidadReal) || 0
-    const sistema = Number(cantidadSistema) || 0
-
-    const diferencia = real - sistema
-    const faltante = diferencia < 0 ? Math.abs(diferencia) : 0
-    const sobrante = diferencia > 0 ? diferencia : 0
-
-    return { diferencia, faltante, sobrante }
-  }
-
   const handleSaveCantidad = async () => {
-    if (productoActual && cantidadReal !== "") {
-      try {
-        setLoading(true)
-        const cantidadIngresada = Number(cantidadReal) || 0
-        const cantidadFinal = modoSuma ? (productoActual.cantidad_real || 0) + cantidadIngresada : cantidadIngresada
+    if (!productoActual || cantidadReal === "") return
 
-        await conteoService.updateProductQuantity(conteoActivo.id, productoActual.producto_id, cantidadFinal)
+    const eraModoSuma = modoSuma
 
-        setProductosConteo((prev) =>
-          prev.map((p) =>
-            p.producto_id === productoActual.producto_id
-              ? {
-                  ...p,
-                  cantidad_real: cantidadFinal,
-                  ...calcularDiferencias(cantidadFinal, p.cantidad_sistema),
-                }
-              : p,
-          ),
-        )
+    try {
+      setLoading(true)
+      const cantidadIngresada = Number(cantidadReal) || 0
+      const cantidadFinal = eraModoSuma ? (productoActual.cantidad_real || 0) + cantidadIngresada : cantidadIngresada
 
-        setOpenCantidadDialog(false)
-        setProductoActual(null)
-        setCantidadReal("")
-        setModoSuma(false)
+      await conteoService.updateProductQuantity(conteoActivo.id, productoActual.producto_id, cantidadFinal)
 
-        setSnackbar({
-          open: true,
-          message: modoSuma
-            ? `Cantidad agregada correctamente. Total: ${cantidadFinal}`
-            : "Cantidad registrada correctamente",
-          severity: "success",
-        })
-      } catch (error) {
-        setSnackbar({
-          open: true,
-          message: "Error al guardar la cantidad",
-          severity: "error",
-        })
-      } finally {
-        setLoading(false)
-      }
+      setProductosConteo((prev) =>
+        prev.map((p) =>
+          p.producto_id === productoActual.producto_id
+            ? {
+                ...p,
+                cantidad_real: cantidadFinal,
+                ...calcularDiferencias(cantidadFinal, p.cantidad_sistema),
+              }
+            : p,
+        ),
+      )
+
+      setOpenCantidadDialog(false)
+      setProductoActual(null)
+      setCantidadReal("")
+      setModoSuma(false)
+
+      showSnackbar(
+        eraModoSuma ? `Sumado. Total: ${cantidadFinal}` : "Cantidad guardada",
+        "success",
+      )
+    } catch (error) {
+      showSnackbar(formatApiError(error), "error")
+    } finally {
+      setLoading(false)
     }
   }
 
   const handleFinalizarConteo = async () => {
-    if (window.confirm("¿Está seguro de finalizar el conteo?")) {
-      try {
-        setLoading(true)
-        setIsLeavingIntentionally(true)
-        await conteoService.finalize(conteoActivo.id)
-
-        localStorage.removeItem(CONTEO_STORAGE_KEY)
-
-        setSnackbar({
-          open: true,
-          message: "Conteo finalizado y guardado en el historial",
-          severity: "success",
-        })
-
-        await refreshData()
-        setConteoActivo(null)
-        setSelectedPlantilla(null)
-        setProductosConteo([])
-      } catch (error) {
-        setSnackbar({
-          open: true,
-          message: "Error al finalizar el conteo",
-          severity: "error",
-        })
-        setIsLeavingIntentionally(false)
-      } finally {
-        setLoading(false)
-      }
+    try {
+      setLoading(true)
+      setIsLeavingIntentionally(true)
+      await conteoService.finalize(conteoActivo.id)
+      localStorage.removeItem(CONTEO_STORAGE_KEY)
+      showSnackbar("Conteo finalizado", "success")
+      await refreshData()
+      setConteoActivo(null)
+      setSelectedPlantilla(null)
+      setProductosConteo([])
+      setOpenFinalizeDialog(false)
+    } catch (error) {
+      showSnackbar(formatApiError(error), "error")
+      setIsLeavingIntentionally(false)
+    } finally {
+      setLoading(false)
     }
   }
 
@@ -304,31 +304,15 @@ const ConteoPage = () => {
       setLoading(true)
       setIsLeavingIntentionally(true)
       await conteoService.delete(conteoActivo.id)
-
       localStorage.removeItem(CONTEO_STORAGE_KEY)
-
-      setSnackbar({
-        open: true,
-        message: "Conteo cancelado correctamente",
-        severity: "info",
-      })
-
+      showSnackbar("Conteo eliminado", "info")
       await refreshData()
       setConteoActivo(null)
       setSelectedPlantilla(null)
       setProductosConteo([])
       setOpenExitDialog(false)
-
-      if (pendingNavigation) {
-        navigate(pendingNavigation)
-        setPendingNavigation(null)
-      }
     } catch (error) {
-      setSnackbar({
-        open: true,
-        message: "Error al cancelar el conteo",
-        severity: "error",
-      })
+      showSnackbar(formatApiError(error), "error")
       setIsLeavingIntentionally(false)
     } finally {
       setLoading(false)
@@ -337,37 +321,40 @@ const ConteoPage = () => {
 
   const handleDejarPendiente = () => {
     setIsLeavingIntentionally(true)
-
-    // El conteo queda guardado en el backend como "en_progreso"
-    // NO eliminamos de localStorage para que pueda restaurarse después
-
-    setSnackbar({
-      open: true,
-      message: "Conteo guardado como pendiente. Puede continuarlo más tarde.",
-      severity: "info",
-    })
-
+    showSnackbar("Guardado. Podés continuar después desde Conteo.", "info")
     setConteoActivo(null)
     setSelectedPlantilla(null)
     setProductosConteo([])
     setOpenExitDialog(false)
-
-    if (pendingNavigation) {
-      navigate(pendingNavigation)
-      setPendingNavigation(null)
-    }
   }
 
-  const handleProductClick = (producto) => {
+  const handleProductClick = useCallback((producto) => {
     setProductoActual(producto)
-    const yaContado = producto.cantidad_real !== null
+    const yaContado = producto.cantidad_real !== null && producto.cantidad_real !== undefined
     setModoSuma(yaContado)
     setCantidadReal("")
     setOpenCantidadDialog(true)
-  }
+  }, [])
 
-  const plantillasFiltradas = plantillas.filter((plantilla) =>
-    plantilla.nombre.toLowerCase().includes(searchPlantilla.toLowerCase()),
+  const handleScanResult = useCallback(
+    (text) => {
+      setScannerOpen(false)
+      const raw = String(text).trim()
+      if (!raw) return
+      const codeNorm = raw.toLowerCase()
+      const match = productosConteo.find((p) => String(p.codigo || "").trim().toLowerCase() === codeNorm)
+      if (!match) {
+        showSnackbar(`Código «${raw}» no está en esta plantilla`, "warning")
+        return
+      }
+      handleProductClick(match)
+    },
+    [productosConteo, handleProductClick, showSnackbar],
+  )
+
+  const plantillasFiltradas = useMemo(
+    () => plantillas.filter((p) => p.nombre?.toLowerCase().includes(searchPlantilla.toLowerCase())),
+    [plantillas, searchPlantilla],
   )
 
   const plantillasPaginadas = plantillasFiltradas.slice(
@@ -375,126 +362,141 @@ const ConteoPage = () => {
     pagePlantilla * rowsPerPagePlantilla + rowsPerPagePlantilla,
   )
 
-  const handleChangePagePlantilla = (event, newPage) => {
-    setPagePlantilla(newPage)
-  }
+  const productosFiltrados = useMemo(() => {
+    const searchLower = debouncedSearch.trim().toLowerCase()
+    return productosConteo.filter((producto) => {
+      const matchesSearch =
+        !searchLower ||
+        producto.nombre?.toLowerCase().includes(searchLower) ||
+        String(producto.codigo || "").toLowerCase().includes(searchLower)
+      const matchesPendientes = mostrarSoloPendientes ? producto.cantidad_real === null || producto.cantidad_real === undefined : true
+      return matchesSearch && matchesPendientes
+    })
+  }, [productosConteo, debouncedSearch, mostrarSoloPendientes])
 
-  const handleChangeRowsPerPagePlantilla = (event) => {
-    setRowsPerPagePlantilla(Number.parseInt(event.target.value, 10))
-    setPagePlantilla(0)
-  }
-
-  const productosFiltrados = productosConteo.filter((producto) => {
-    const searchLower = searchProducto.toLowerCase()
-    const matchesSearch =
-      producto.nombre.toLowerCase().includes(searchLower) || producto.codigo.toLowerCase().includes(searchLower)
-    const matchesPendientes = mostrarSoloPendientes ? producto.cantidad_real === null : true
-    return matchesSearch && matchesPendientes
-  })
-
-  const productosContados = productosConteo.filter((p) => p.cantidad_real !== null).length
+  const productosContados = useMemo(() => productosConteo.filter((p) => p.cantidad_real !== null && p.cantidad_real !== undefined).length, [productosConteo])
   const totalProductos = productosConteo.length
   const productosPendientes = totalProductos - productosContados
   const progreso = totalProductos > 0 ? (productosContados / totalProductos) * 100 : 0
 
-  const diferenciasActuales =
-    productoActual && cantidadReal !== "" ? calcularDiferencias(cantidadReal, productoActual.cantidad_sistema) : null
+  const cardHoverSx = {
+    transition: "background-color 0.15s, box-shadow 0.15s",
+    "@media (hover: hover)": {
+      "&:hover": {
+        boxShadow: 2,
+      },
+    },
+  }
 
   if (!conteoActivo) {
     return (
-      <Container maxWidth="lg" sx={{ py: { xs: 2, sm: 3 }, pb: 10 }}>
-        <Box sx={{ mb: { xs: 2, sm: 3 } }}>
-          <Typography variant="h5" fontWeight="bold" gutterBottom sx={{ fontSize: { xs: "1.25rem", sm: "1.5rem" } }}>
-            Iniciar Conteo
+      <Container
+        maxWidth="md"
+        sx={{
+          py: { xs: 2, sm: 3 },
+          pb: { xs: "calc(88px + env(safe-area-inset-bottom, 0px))", sm: 10 },
+        }}
+      >
+        <Backdrop open={loading} sx={{ zIndex: (t) => t.zIndex.drawer + 1, color: "#fff" }}>
+          <Stack alignItems="center" spacing={2}>
+            <CircularProgress color="inherit" />
+            <Typography variant="body2">Cargando…</Typography>
+          </Stack>
+        </Backdrop>
+
+        <Stack spacing={1} sx={{ mb: 2 }}>
+          <Typography variant="h5" fontWeight={800} sx={{ fontSize: { xs: "1.35rem", sm: "1.5rem" } }}>
+            Iniciar conteo
           </Typography>
-          <Typography variant="body2" color="text.secondary" sx={{ fontSize: { xs: "0.813rem", sm: "0.875rem" } }}>
-            Seleccione una plantilla para comenzar
+          <Typography variant="body2" color="text.secondary">
+            Elegí una plantilla. En celular: tocá la tarjeta o el botón para comenzar.
           </Typography>
-        </Box>
+        </Stack>
 
         {plantillas.length === 0 ? (
-          <Alert severity="info">No hay plantillas disponibles. Cree una plantilla primero.</Alert>
+          <Alert severity="info">No hay plantillas. Creá una en la sección Plantillas.</Alert>
         ) : (
           <>
             <TextField
               fullWidth
-              placeholder="Buscar plantilla por nombre..."
+              placeholder="Buscar plantilla…"
               value={searchPlantilla}
               onChange={(e) => {
                 setSearchPlantilla(e.target.value)
                 setPagePlantilla(0)
               }}
               InputProps={{
-                startAdornment: <Search sx={{ color: "text.secondary", mr: 1 }} />,
+                startAdornment: (
+                  <InputAdornment position="start">
+                    <Search color="action" />
+                  </InputAdornment>
+                ),
               }}
-              sx={{
-                mb: 2,
-                "& .MuiInputBase-input": {
-                  fontSize: { xs: "0.938rem", sm: "1rem" },
-                  py: { xs: 1.5, sm: 2 },
-                },
-              }}
+              sx={{ mb: 2, "& .MuiInputBase-root": { minHeight: 52 } }}
             />
 
             {plantillasFiltradas.length === 0 ? (
-              <Alert severity="info">No se encontraron plantillas con ese nombre</Alert>
+              <Alert severity="info">Sin resultados</Alert>
             ) : (
               <>
-                <Box sx={{ display: "flex", flexDirection: "column", gap: 2, mb: 2 }}>
+                <Stack spacing={1.5} sx={{ mb: 2 }}>
                   {plantillasPaginadas.map((plantilla) => (
-                    <Card key={plantilla.id}>
-                      <CardContent sx={{ p: { xs: 2, sm: 3 } }}>
-                        <Typography
-                          variant="subtitle1"
-                          fontWeight="bold"
-                          sx={{ fontSize: { xs: "1rem", sm: "1.125rem" } }}
-                        >
-                          {plantilla.nombre}
-                        </Typography>
-                        <Typography
-                          variant="body2"
-                          color="text.secondary"
-                          gutterBottom
-                          sx={{ fontSize: { xs: "0.813rem", sm: "0.875rem" } }}
-                        >
-                          {plantilla.descripcion}
-                        </Typography>
-                        <Box sx={{ display: "flex", justifyContent: "space-between", alignItems: "center", mt: 2 }}>
-                          <Chip label={`${plantilla.productos?.length || 0} productos`} size="small" color="primary" />
+                    <Card
+                      key={plantilla.id}
+                      variant="outlined"
+                      onClick={() => !loading && handleSelectPlantilla(plantilla)}
+                      sx={{
+                        borderRadius: 2,
+                        cursor: loading ? "default" : "pointer",
+                        ...cardHoverSx,
+                      }}
+                    >
+                      <CardContent sx={{ py: 2, "&:last-child": { pb: 2 } }}>
+                        <Stack direction="row" alignItems="center" justifyContent="space-between" gap={2}>
+                          <Box sx={{ minWidth: 0, flex: 1 }}>
+                            <Typography variant="subtitle1" fontWeight={700}>
+                              {plantilla.nombre}
+                            </Typography>
+                            {plantilla.descripcion ? (
+                              <Typography variant="body2" color="text.secondary" noWrap sx={{ maxWidth: "100%" }}>
+                                {plantilla.descripcion}
+                              </Typography>
+                            ) : null}
+                            <Chip label={`${plantilla.productos?.length || 0} ítems`} size="small" sx={{ mt: 1 }} color="primary" variant="outlined" />
+                          </Box>
                           <Button
                             variant="contained"
-                            onClick={() => handleSelectPlantilla(plantilla)}
+                            size="medium"
                             disabled={loading}
-                            size="large"
-                            sx={{
-                              minHeight: { xs: 42, sm: 36 },
-                              fontSize: { xs: "0.938rem", sm: "0.875rem" },
+                            onClick={(e) => {
+                              e.stopPropagation()
+                              handleSelectPlantilla(plantilla)
                             }}
+                            startIcon={<PlayArrow />}
+                            sx={{ flexShrink: 0, minHeight: 44, px: 2 }}
                           >
-                            Seleccionar
+                            Iniciar
                           </Button>
-                        </Box>
+                        </Stack>
                       </CardContent>
                     </Card>
                   ))}
-                </Box>
+                </Stack>
 
-                <Paper>
+                <Paper variant="outlined" sx={{ borderRadius: 2 }}>
                   <TablePagination
                     component="div"
                     count={plantillasFiltradas.length}
                     page={pagePlantilla}
-                    onPageChange={handleChangePagePlantilla}
+                    onPageChange={(_, p) => setPagePlantilla(p)}
                     rowsPerPage={rowsPerPagePlantilla}
-                    onRowsPerPageChange={handleChangeRowsPerPagePlantilla}
-                    rowsPerPageOptions={[10, 25, 50]}
-                    labelRowsPerPage="Plantillas por página:"
-                    labelDisplayedRows={({ from, to, count }) => `${from}-${to} de ${count}`}
-                    sx={{
-                      ".MuiTablePagination-selectLabel, .MuiTablePagination-displayedRows": {
-                        fontSize: { xs: "0.813rem", sm: "0.875rem" },
-                      },
+                    onRowsPerPageChange={(e) => {
+                      setRowsPerPagePlantilla(Number.parseInt(e.target.value, 10))
+                      setPagePlantilla(0)
                     }}
+                    rowsPerPageOptions={isXs ? [8, 16, 24] : [12, 24, 48]}
+                    labelRowsPerPage="Por página"
+                    labelDisplayedRows={({ from, to, count }) => `${from}-${to} de ${count}`}
                   />
                 </Paper>
               </>
@@ -502,324 +504,288 @@ const ConteoPage = () => {
           </>
         )}
 
-        <Dialog open={openReminderDialog} onClose={() => setOpenReminderDialog(false)} maxWidth="sm" fullWidth>
-          <DialogTitle sx={{ fontSize: { xs: "1.125rem", sm: "1.25rem" } }}>Recordatorio Importante</DialogTitle>
+        <Dialog
+          open={openReminderDialog}
+          onClose={() => !loading && setOpenReminderDialog(false)}
+          fullWidth
+          maxWidth="sm"
+          fullScreen={isXs}
+        >
+          <DialogTitle sx={{ fontWeight: 700 }}>Antes de empezar</DialogTitle>
           <DialogContent>
-            <Alert severity="warning" sx={{ mb: 2 }}>
-              Antes de iniciar el conteo
+            <Alert severity="warning" variant="outlined" sx={{ mb: 2 }}>
+              ¿Actualizaste el stock en <strong>Productos</strong> (Excel) antes de contar?
             </Alert>
-            <Typography variant="body1" gutterBottom sx={{ fontSize: { xs: "0.938rem", sm: "1rem" } }}>
-              ¿La lista de productos está actualizada con el stock del sistema?
-            </Typography>
-            <Typography
-              variant="body2"
-              color="text.secondary"
-              sx={{ mt: 2, fontSize: { xs: "0.875rem", sm: "0.813rem" } }}
-            >
-              Recuerde que el objetivo del conteo es comparar el stock físico con el stock cargado en el sistema desde
-              el Excel. Asegúrese de haber actualizado la lista de productos antes de continuar.
+            <Typography variant="body2" color="text.secondary">
+              El conteo compara lo que hay en depósito con el stock del sistema. Si el Excel está desactualizado, las diferencias no serán útiles.
             </Typography>
           </DialogContent>
-          <DialogActions sx={{ flexDirection: "column", gap: 1, p: 2 }}>
-            <Button
-              variant="contained"
-              onClick={handleConfirmarInicioConteo}
-              fullWidth
-              disabled={loading}
-              size="large"
-              sx={{ minHeight: { xs: 48, sm: 42 }, fontSize: { xs: "0.938rem", sm: "0.875rem" } }}
-            >
-              Sí, la lista está actualizada
+          <DialogActions sx={{ flexDirection: "column", gap: 1, p: 2, pt: 0 }}>
+            <Button variant="contained" fullWidth size="large" disabled={loading} onClick={handleConfirmarInicioConteo} sx={{ minHeight: 48 }}>
+              Sí, continuar
             </Button>
             <Button
               variant="outlined"
+              fullWidth
+              size="large"
+              disabled={loading}
               onClick={() => {
                 setOpenReminderDialog(false)
                 setPlantillaToSelect(null)
               }}
-              fullWidth
-              size="large"
-              sx={{ minHeight: { xs: 48, sm: 42 }, fontSize: { xs: "0.938rem", sm: "0.875rem" } }}
+              sx={{ minHeight: 48 }}
             >
               Cancelar
             </Button>
           </DialogActions>
         </Dialog>
+
+        <Snackbar
+          open={snackbar.open}
+          autoHideDuration={3200}
+          onClose={() => setSnackbar((s) => ({ ...s, open: false }))}
+          anchorOrigin={{ vertical: "bottom", horizontal: "center" }}
+        >
+          <Alert severity={snackbar.severity} variant="filled" onClose={() => setSnackbar((s) => ({ ...s, open: false }))} sx={{ width: "100%" }}>
+            {snackbar.message}
+          </Alert>
+        </Snackbar>
       </Container>
     )
   }
 
   return (
-    <Container maxWidth="lg" sx={{ py: { xs: 2, sm: 3 }, pb: 10 }}>
-      <Box sx={{ mb: { xs: 2, sm: 3 } }}>
-        <Typography variant="h5" fontWeight="bold" gutterBottom sx={{ fontSize: { xs: "1.25rem", sm: "1.5rem" } }}>
-          Conteo en Progreso
-        </Typography>
-        <Typography variant="body2" color="text.secondary" sx={{ fontSize: { xs: "0.813rem", sm: "0.875rem" } }}>
-          {selectedPlantilla.nombre}
-        </Typography>
-      </Box>
+    <Container
+      maxWidth="md"
+      sx={{
+        py: { xs: 1.5, sm: 2 },
+        pb: { xs: "calc(100px + env(safe-area-inset-bottom, 0px))", sm: "calc(88px + env(safe-area-inset-bottom, 0px))" },
+        px: { xs: 1.5, sm: 3 },
+      }}
+    >
+      <Backdrop open={loading} sx={{ zIndex: (t) => t.zIndex.modal - 1, backdropFilter: "blur(2px)" }}>
+        <CircularProgress color="primary" />
+      </Backdrop>
 
-      <Card sx={{ mb: 3 }}>
-        <CardContent sx={{ p: { xs: 2, sm: 3 } }}>
-          <Box sx={{ display: "flex", justifyContent: "space-between", alignItems: "center", mb: 2 }}>
-            <Typography variant="subtitle2" sx={{ fontSize: { xs: "0.875rem", sm: "0.938rem" } }}>
-              Progreso: {productosContados} / {totalProductos}
-            </Typography>
-            <Typography
-              variant="subtitle2"
-              color="primary"
-              fontWeight="bold"
-              sx={{ fontSize: { xs: "0.875rem", sm: "0.938rem" } }}
-            >
-              {progreso.toFixed(0)}%
-            </Typography>
-          </Box>
-          <LinearProgress variant="determinate" value={progreso} sx={{ height: { xs: 10, sm: 8 }, borderRadius: 4 }} />
-        </CardContent>
-      </Card>
-
-      <TextField
-        fullWidth
-        placeholder="Buscar producto por nombre o código..."
-        value={searchProducto}
-        onChange={(e) => setSearchProducto(e.target.value)}
-        InputProps={{
-          startAdornment: <Search sx={{ color: "text.secondary", mr: 1 }} />,
-        }}
+      <Paper
+        elevation={0}
         sx={{
+          position: "sticky",
+          top: 0,
+          zIndex: 2,
           mb: 2,
-          "& .MuiInputBase-root": {
-            fontSize: { xs: "1rem", sm: "0.938rem" },
-            minHeight: { xs: 56, sm: 48 },
-          },
-          "& .MuiInputBase-input": {
-            py: { xs: 2, sm: 1.5 },
-          },
+          p: { xs: 1.5, sm: 2 },
+          borderRadius: 2,
+          bgcolor: "background.paper",
+          border: "1px solid",
+          borderColor: "divider",
         }}
-      />
-
-      <Paper sx={{ p: 2, mb: 3, bgcolor: mostrarSoloPendientes ? "warning.50" : "background.paper" }}>
-        <Box sx={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-          <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
-            <FilterList sx={{ color: "text.secondary" }} />
-            <Box>
-              <Typography variant="subtitle2" fontWeight="bold" sx={{ fontSize: { xs: "0.938rem", sm: "1rem" } }}>
-                Mostrar solo pendientes
-              </Typography>
-              <Typography variant="caption" color="text.secondary" sx={{ fontSize: { xs: "0.75rem", sm: "0.813rem" } }}>
-                {mostrarSoloPendientes
-                  ? `${productosPendientes} productos sin contar`
-                  : `${totalProductos} productos en total`}
-              </Typography>
-            </Box>
-          </Box>
-          <FormControlLabel
-            control={
-              <Switch
-                checked={mostrarSoloPendientes}
-                onChange={(e) => setMostrarSoloPendientes(e.target.checked)}
-                color="warning"
-              />
-            }
-            label=""
-            sx={{ m: 0 }}
-          />
-        </Box>
+      >
+        <Typography variant="caption" color="text.secondary" fontWeight={600} sx={{ textTransform: "uppercase", letterSpacing: 0.5 }}>
+          Conteo activo
+        </Typography>
+        <Typography variant="subtitle1" fontWeight={800} sx={{ lineHeight: 1.25, mb: 1 }}>
+          {selectedPlantilla?.nombre}
+        </Typography>
+        <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ mb: 0.75 }}>
+          <Typography variant="body2" color="text.secondary">
+            {productosContados} / {totalProductos}
+          </Typography>
+          <Typography variant="body2" fontWeight={800} color="primary.main">
+            {progreso.toFixed(0)}%
+          </Typography>
+        </Stack>
+        <LinearProgress variant="determinate" value={progreso} sx={{ height: 8, borderRadius: 4 }} />
       </Paper>
 
-      <Box sx={{ mb: 3 }}>
+      <Stack direction={{ xs: "column", sm: "row" }} spacing={1} sx={{ mb: 2 }}>
+        <TextField
+          fullWidth
+          placeholder="Buscar por nombre o código…"
+          value={searchProducto}
+          onChange={(e) => setSearchProducto(e.target.value)}
+          InputProps={{
+            startAdornment: (
+              <InputAdornment position="start">
+                <Search color="action" />
+              </InputAdornment>
+            ),
+          }}
+          sx={{ "& .MuiInputBase-root": { minHeight: 52 } }}
+        />
         <Button
           variant="contained"
-          color="success"
-          startIcon={<CheckCircle />}
-          onClick={handleFinalizarConteo}
-          fullWidth
-          size="large"
-          disabled={loading}
-          sx={{ minHeight: { xs: 56, sm: 48 }, fontSize: { xs: "1rem", sm: "0.938rem" } }}
+          color="secondary"
+          startIcon={<QrCodeScanner />}
+          onClick={() => setScannerOpen(true)}
+          sx={{ minHeight: 52, flexShrink: 0, whiteSpace: "nowrap", display: { xs: "none", sm: "inline-flex" } }}
         >
-          Finalizar Conteo
+          Escanear
         </Button>
-      </Box>
+      </Stack>
 
-      <Divider sx={{ my: 3 }} />
+      <Paper
+        variant="outlined"
+        sx={{
+          p: 1.5,
+          mb: 2,
+          borderRadius: 2,
+          bgcolor: mostrarSoloPendientes ? "warning.50" : "background.paper",
+        }}
+      >
+        <Stack direction="row" alignItems="center" justifyContent="space-between">
+          <Stack direction="row" spacing={1} alignItems="center" sx={{ minWidth: 0 }}>
+            <FilterList color="action" />
+            <Box sx={{ minWidth: 0 }}>
+              <Typography variant="body2" fontWeight={700}>
+                Solo pendientes
+              </Typography>
+              <Typography variant="caption" color="text.secondary" display="block">
+                {mostrarSoloPendientes ? `${productosPendientes} sin cantidad` : "Mostrar todos"}
+              </Typography>
+            </Box>
+          </Stack>
+          <Switch checked={mostrarSoloPendientes} onChange={(e) => setMostrarSoloPendientes(e.target.checked)} color="warning" />
+        </Stack>
+      </Paper>
 
-      <Typography variant="subtitle1" fontWeight="bold" gutterBottom sx={{ fontSize: { xs: "1rem", sm: "1.125rem" } }}>
-        Productos ({productosContados}/{totalProductos}){searchProducto && ` - ${productosFiltrados.length} resultados`}
-        {mostrarSoloPendientes && !searchProducto && ` - ${productosFiltrados.length} pendientes`}
+      <Button
+        variant="contained"
+        color="success"
+        size="large"
+        startIcon={<CheckCircle />}
+        onClick={() => setOpenFinalizeDialog(true)}
+        fullWidth
+        disabled={loading}
+        sx={{ minHeight: 52, mb: 2, fontWeight: 700 }}
+      >
+        Finalizar conteo
+      </Button>
+
+      <Typography variant="subtitle2" fontWeight={700} sx={{ mb: 1 }}>
+        Productos
+        {debouncedSearch.trim() ? ` · ${productosFiltrados.length} resultados` : ""}
       </Typography>
 
-      {productosFiltrados.length === 0 && searchProducto && (
+      {productosFiltrados.length === 0 && debouncedSearch.trim() && (
         <Alert severity="info" sx={{ mb: 2 }}>
-          No se encontraron productos que coincidan con "{searchProducto}"
+          No hay coincidencias para «{debouncedSearch}»
         </Alert>
       )}
 
-      {productosFiltrados.length === 0 && mostrarSoloPendientes && !searchProducto && (
+      {productosFiltrados.length === 0 && mostrarSoloPendientes && !debouncedSearch.trim() && (
         <Alert severity="success" sx={{ mb: 2 }}>
-          ¡Excelente! No hay productos pendientes por contar.
+          No quedan pendientes en esta vista.
         </Alert>
       )}
 
-      <Box sx={{ display: "flex", flexDirection: "column", gap: 1 }}>
-        {productosFiltrados.map((producto) => (
-          <Card
-            key={producto.producto_id}
-            onClick={() => handleProductClick(producto)}
-            sx={{
-              bgcolor: producto.cantidad_real !== null ? "success.50" : "background.paper",
-              border: producto.cantidad_real !== null ? "1px solid" : "none",
-              borderColor: "success.main",
-              cursor: "pointer",
-              transition: "all 0.2s",
-              "&:hover": {
-                transform: "scale(1.01)",
-                boxShadow: 2,
-              },
-              "&:active": {
-                transform: "scale(0.99)",
-              },
-            }}
-          >
-            <CardContent sx={{ py: { xs: 2, sm: 1.5 } }}>
-              <Box sx={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
-                <Box sx={{ flex: 1 }}>
-                  <Typography
-                    variant="subtitle2"
-                    fontWeight="bold"
-                    sx={{ fontSize: { xs: "0.938rem", sm: "0.875rem" } }}
-                  >
-                    {producto.nombre}
-                  </Typography>
-                  <Typography
-                    variant="caption"
-                    color="text.secondary"
-                    display="block"
-                    sx={{ fontSize: { xs: "0.75rem", sm: "0.688rem" } }}
-                  >
-                    Código: {producto.codigo}
-                  </Typography>
-                  {producto.cantidad_real !== null && (
-                    <Box sx={{ mt: 1, display: "flex", gap: 1, flexWrap: "wrap" }}>
-                      <Chip
-                        label={`Real: ${producto.cantidad_real}`}
-                        size="small"
-                        color="primary"
-                        sx={{ fontSize: { xs: "0.75rem", sm: "0.688rem" } }}
-                      />
-                      <Chip
-                        label={`Sistema: ${producto.cantidad_sistema}`}
-                        size="small"
-                        variant="outlined"
-                        sx={{ fontSize: { xs: "0.75rem", sm: "0.688rem" } }}
-                      />
-                      {producto.faltante > 0 && (
-                        <Chip
-                          icon={<TrendingDown />}
-                          label={`Faltante: ${producto.faltante}`}
-                          size="small"
-                          color="error"
-                          sx={{ fontSize: { xs: "0.75rem", sm: "0.688rem" } }}
-                        />
-                      )}
-                      {producto.sobrante > 0 && (
-                        <Chip
-                          icon={<TrendingUp />}
-                          label={`Sobrante: ${producto.sobrante}`}
-                          size="small"
-                          color="warning"
-                          sx={{ fontSize: { xs: "0.75rem", sm: "0.688rem" } }}
-                        />
-                      )}
-                      {producto.faltante === 0 && producto.sobrante === 0 && (
-                        <Chip
-                          icon={<CheckCircleOutline />}
-                          label="OK"
-                          size="small"
-                          color="success"
-                          sx={{ fontSize: { xs: "0.75rem", sm: "0.688rem" } }}
-                        />
-                      )}
-                    </Box>
-                  )}
-                </Box>
-                <Chip
-                  label={producto.cantidad_real !== null ? "Contado" : "Pendiente"}
-                  color={producto.cantidad_real !== null ? "success" : "default"}
-                  size="small"
-                  sx={{ fontSize: { xs: "0.75rem", sm: "0.688rem" } }}
-                />
-              </Box>
-            </CardContent>
-          </Card>
-        ))}
-      </Box>
+      <Stack spacing={1} sx={{ mb: 2 }}>
+        {productosFiltrados.map((producto) => {
+          const hecho = producto.cantidad_real !== null && producto.cantidad_real !== undefined
+          return (
+            <Card
+              key={producto.producto_id}
+              onClick={() => handleProductClick(producto)}
+              variant="outlined"
+              sx={{
+                borderRadius: 2,
+                cursor: "pointer",
+                borderColor: hecho ? "success.light" : "divider",
+                bgcolor: hecho ? "success.50" : "background.paper",
+                ...cardHoverSx,
+                "&:active": { bgcolor: hecho ? "success.100" : "action.selected" },
+              }}
+            >
+              <CardContent sx={{ py: 1.75, px: 2, "&:last-child": { pb: 1.75 } }}>
+                <Stack direction="row" justifyContent="space-between" alignItems="flex-start" gap={1}>
+                  <Box sx={{ minWidth: 0, flex: 1 }}>
+                    <Typography variant="body1" fontWeight={700} sx={{ fontSize: { xs: "0.95rem", sm: "1rem" }, lineHeight: 1.3 }}>
+                      {producto.nombre}
+                    </Typography>
+                    <Typography variant="caption" color="text.secondary">
+                      {producto.codigo}
+                    </Typography>
+                    {hecho && (
+                      <Stack direction="row" flexWrap="wrap" gap={0.5} sx={{ mt: 1 }}>
+                        <Chip size="small" label={`Real ${producto.cantidad_real}`} color="primary" />
+                        <Chip size="small" label={`Sist. ${producto.cantidad_sistema}`} variant="outlined" />
+                        {producto.faltante > 0 && <Chip size="small" icon={<TrendingDown />} label={`−${producto.faltante}`} color="error" />}
+                        {producto.sobrante > 0 && <Chip size="small" icon={<TrendingUp />} label={`+${producto.sobrante}`} color="warning" />}
+                        {producto.faltante === 0 && producto.sobrante === 0 && (
+                          <Chip size="small" icon={<CheckCircleOutline />} label="OK" color="success" />
+                        )}
+                      </Stack>
+                    )}
+                  </Box>
+                  <Chip size="small" label={hecho ? "Listo" : "Pend."} color={hecho ? "success" : "default"} sx={{ flexShrink: 0 }} />
+                </Stack>
+              </CardContent>
+            </Card>
+          )
+        })}
+      </Stack>
 
-      <Dialog
-        open={openExitDialog}
-        onClose={() => setOpenExitDialog(false)}
-        maxWidth="sm"
-        fullWidth
-        disableEscapeKeyDown
+      <Fab
+        color="secondary"
+        aria-label="escanear código"
+        onClick={() => setScannerOpen(true)}
+        sx={{
+          position: "fixed",
+          right: 16,
+          bottom: "calc(72px + env(safe-area-inset-bottom, 0px))",
+          zIndex: theme.zIndex.speedDial,
+          display: { xs: "flex", sm: "none" },
+        }}
       >
-        <DialogTitle sx={{ fontSize: { xs: "1.125rem", sm: "1.25rem" } }}>¿Qué desea hacer con el conteo?</DialogTitle>
+        <QrCodeScanner />
+      </Fab>
+
+      <Dialog open={scannerOpen} onClose={() => setScannerOpen(false)} fullWidth maxWidth="sm" fullScreen={isXs}>
+        <DialogTitle sx={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+          Escanear código
+          <IconButton edge="end" onClick={() => setScannerOpen(false)} aria-label="cerrar">
+            <Cancel />
+          </IconButton>
+        </DialogTitle>
+        <DialogContent>
+          <BarcodeScanner onScan={handleScanResult} onClose={() => setScannerOpen(false)} />
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={openExitDialog} onClose={() => setOpenExitDialog(false)} fullWidth maxWidth="sm" fullScreen={isXs} disableEscapeKeyDown>
+        <DialogTitle fontWeight={700}>Salir del conteo</DialogTitle>
         <DialogContent>
           <Alert severity="warning" sx={{ mb: 2 }}>
-            Está intentando salir del conteo en progreso
+            Elegí qué hacer con el progreso guardado en el servidor.
           </Alert>
-          <Typography variant="body2" gutterBottom sx={{ mb: 2, fontSize: { xs: "0.875rem", sm: "0.938rem" } }}>
-            Elija una de las siguientes opciones:
-          </Typography>
-          <Box sx={{ display: "flex", flexDirection: "column", gap: 1.5 }}>
-            <Paper sx={{ p: 2, bgcolor: "error.50", border: "1px solid", borderColor: "error.light" }}>
-              <Typography variant="subtitle2" fontWeight="bold" color="error.main" gutterBottom>
-                Cancelar Conteo
+          <Stack spacing={1.5}>
+            <Paper variant="outlined" sx={{ p: 2, borderColor: "error.light", bgcolor: "error.50" }}>
+              <Typography variant="subtitle2" fontWeight={700} color="error">
+                Borrar conteo
               </Typography>
               <Typography variant="caption" color="text.secondary">
-                El conteo será eliminado permanentemente y no aparecerá en el historial.
+                Se elimina del historial. No se puede recuperar.
               </Typography>
             </Paper>
-            <Paper sx={{ p: 2, bgcolor: "warning.50", border: "1px solid", borderColor: "warning.light" }}>
-              <Typography variant="subtitle2" fontWeight="bold" color="warning.main" gutterBottom>
-                Guardar como Pendiente
+            <Paper variant="outlined" sx={{ p: 2, borderColor: "warning.light", bgcolor: "warning.50" }}>
+              <Typography variant="subtitle2" fontWeight={700} color="warning.dark">
+                Dejar pendiente
               </Typography>
               <Typography variant="caption" color="text.secondary">
-                El conteo se guardará y podrá continuarlo más tarde desde el historial.
+                Volvé después desde Conteo: se restaura solo.
               </Typography>
             </Paper>
-          </Box>
+          </Stack>
         </DialogContent>
         <DialogActions sx={{ flexDirection: "column", gap: 1, p: 2 }}>
-          <Button
-            variant="contained"
-            color="error"
-            startIcon={<Cancel />}
-            onClick={handleCancelarConteo}
-            fullWidth
-            disabled={loading}
-            sx={{ minHeight: { xs: 56, sm: 48 }, fontSize: { xs: "1rem", sm: "0.938rem" } }}
-          >
-            Cancelar Conteo (Eliminar)
+          <Button variant="contained" color="error" fullWidth size="large" disabled={loading} onClick={handleCancelarConteo} sx={{ minHeight: 48 }}>
+            Borrar conteo
           </Button>
-          <Button
-            variant="contained"
-            color="warning"
-            startIcon={<ExitToApp />}
-            onClick={handleDejarPendiente}
-            fullWidth
-            disabled={loading}
-            sx={{ minHeight: { xs: 56, sm: 48 }, fontSize: { xs: "1rem", sm: "0.938rem" } }}
-          >
-            Guardar como Pendiente
+          <Button variant="contained" color="warning" fullWidth size="large" disabled={loading} onClick={handleDejarPendiente} sx={{ minHeight: 48 }}>
+            Dejar pendiente y salir
           </Button>
-          <Button
-            variant="outlined"
-            onClick={() => setOpenExitDialog(false)}
-            fullWidth
-            sx={{ minHeight: { xs: 48, sm: 42 } }}
-          >
-            Continuar Conteo
+          <Button variant="outlined" fullWidth size="large" onClick={() => setOpenExitDialog(false)} sx={{ minHeight: 48 }}>
+            Seguir contando
           </Button>
         </DialogActions>
       </Dialog>
@@ -834,157 +800,121 @@ const ConteoPage = () => {
         }}
         fullWidth
         maxWidth="sm"
+        fullScreen={isXs}
       >
-        <DialogTitle sx={{ fontSize: { xs: "1.125rem", sm: "1.25rem" } }}>
-          {modoSuma ? "Agregar Cantidad" : "Ingresar Cantidad Real"}
-        </DialogTitle>
+        <DialogTitle sx={{ fontWeight: 700 }}>{modoSuma ? "Sumar cantidad" : "Cantidad real"}</DialogTitle>
         <DialogContent>
           {productoActual && (
-            <Box sx={{ mt: 1 }}>
+            <Stack spacing={2} sx={{ mt: 1 }}>
               {modoSuma && (
-                <Alert severity="info" sx={{ mb: 2 }}>
-                  Este producto ya tiene una cantidad registrada. La cantidad que ingrese se sumará al total existente.
+                <Alert severity="info" variant="outlined">
+                  Se suma a lo ya cargado: <strong>{productoActual.cantidad_real}</strong>
                 </Alert>
               )}
 
-              <Paper sx={{ p: { xs: 2.5, sm: 2 }, mb: 2, bgcolor: "primary.50" }}>
-                <Typography
-                  variant="subtitle1"
-                  fontWeight="bold"
-                  gutterBottom
-                  sx={{ fontSize: { xs: "1rem", sm: "1.125rem" } }}
-                >
+              <Paper variant="outlined" sx={{ p: 2, bgcolor: "primary.50", borderRadius: 2 }}>
+                <Typography variant="subtitle1" fontWeight={800}>
                   {productoActual.nombre}
                 </Typography>
-                <Typography
-                  variant="body2"
-                  color="text.secondary"
-                  sx={{ fontSize: { xs: "0.875rem", sm: "0.938rem" } }}
-                >
-                  Código: {productoActual.codigo}
+                <Typography variant="body2" color="text.secondary">
+                  Código {productoActual.codigo} · Stock sistema {productoActual.cantidad_sistema}
                 </Typography>
-                <Typography
-                  variant="body2"
-                  color="text.secondary"
-                  sx={{ fontSize: { xs: "0.875rem", sm: "0.938rem" } }}
-                >
-                  Stock en Sistema: {productoActual.cantidad_sistema}
-                </Typography>
-                {modoSuma && (
-                  <Typography
-                    variant="body2"
-                    color="primary"
-                    fontWeight="bold"
-                    sx={{ fontSize: { xs: "0.875rem", sm: "0.813rem" }, mt: 1 }}
-                  >
-                    Cantidad Actual Contada: {productoActual.cantidad_real}
-                  </Typography>
-                )}
               </Paper>
 
               <TextField
+                inputRef={cantidadInputRef}
                 fullWidth
-                label={modoSuma ? "Cantidad a Agregar" : "Cantidad Real"}
-                type="number"
+                label={modoSuma ? "Cantidad a sumar" : "Cantidad contada"}
+                type="text"
                 value={cantidadReal}
-                onChange={(e) => setCantidadReal(e.target.value)}
+                onChange={(e) => setCantidadReal(e.target.value.replace(/\D/g, ""))}
                 onFocus={(e) => e.target.select()}
-                autoFocus
-                inputProps={{ min: 0, inputMode: "numeric" }}
-                helperText={
-                  modoSuma && cantidadReal
-                    ? `Total después de agregar: ${(productoActual.cantidad_real || 0) + (Number(cantidadReal) || 0)}`
-                    : ""
-                }
-                sx={{
-                  "& .MuiInputBase-input": {
-                    fontSize: { xs: "1.125rem", sm: "1rem" },
-                    py: { xs: 2, sm: 1.5 },
-                  },
-                  "& .MuiInputLabel-root": {
-                    fontSize: { xs: "1rem", sm: "0.938rem" },
-                  },
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && cantidadReal !== "" && !loading) handleSaveCantidad()
                 }}
+                autoComplete="off"
+                inputProps={{ inputMode: "numeric", pattern: "[0-9]*" }}
+                sx={{ "& .MuiInputBase-input": { fontSize: "1.35rem", py: 1.75, textAlign: "center" } }}
               />
 
               {cantidadReal !== "" &&
                 (() => {
-                  const cantidadIngresada = Number(cantidadReal) || 0
-                  const cantidadFinal = modoSuma
-                    ? (productoActual.cantidad_real || 0) + cantidadIngresada
-                    : cantidadIngresada
-                  const difs = calcularDiferencias(cantidadFinal, productoActual.cantidad_sistema)
-
+                  const ing = Number(cantidadReal) || 0
+                  const finalQty = modoSuma ? (productoActual.cantidad_real || 0) + ing : ing
+                  const difs = calcularDiferencias(finalQty, productoActual.cantidad_sistema)
                   return (
-                    <Box sx={{ mt: 2, display: "flex", gap: 1, flexWrap: "wrap" }}>
-                      {difs.faltante > 0 && (
-                        <Chip
-                          icon={<TrendingDown />}
-                          label={`Faltante: ${difs.faltante}`}
-                          color="error"
-                          sx={{ fontSize: { xs: "0.875rem", sm: "0.813rem" } }}
-                        />
-                      )}
-                      {difs.sobrante > 0 && (
-                        <Chip
-                          icon={<TrendingUp />}
-                          label={`Sobrante: ${difs.sobrante}`}
-                          color="warning"
-                          sx={{ fontSize: { xs: "0.875rem", sm: "0.813rem" } }}
-                        />
-                      )}
+                    <Stack direction="row" flexWrap="wrap" gap={1}>
+                      {difs.faltante > 0 && <Chip icon={<TrendingDown />} label={`Faltante ${difs.faltante}`} color="error" />}
+                      {difs.sobrante > 0 && <Chip icon={<TrendingUp />} label={`Sobrante ${difs.sobrante}`} color="warning" />}
                       {difs.faltante === 0 && difs.sobrante === 0 && (
-                        <Chip
-                          icon={<CheckCircleOutline />}
-                          label="Coincide con el sistema"
-                          color="success"
-                          sx={{ fontSize: { xs: "0.875rem", sm: "0.813rem" } }}
-                        />
+                        <Chip icon={<CheckCircleOutline />} label="Igual al sistema" color="success" />
                       )}
-                    </Box>
+                    </Stack>
                   )
                 })()}
-            </Box>
+            </Stack>
           )}
         </DialogContent>
-        <DialogActions sx={{ p: 2, gap: 1 }}>
+        <DialogActions sx={{ p: 2, gap: 1, flexDirection: { xs: "column-reverse", sm: "row" } }}>
           <Button
+            fullWidth
+            size="large"
             onClick={() => {
               setOpenCantidadDialog(false)
               setProductoActual(null)
               setCantidadReal("")
               setModoSuma(false)
             }}
-            fullWidth
-            size="large"
-            sx={{ minHeight: { xs: 48, sm: 42 } }}
+            sx={{ minHeight: 48 }}
           >
-            Cancelar
+            Cerrar
           </Button>
           <Button
-            onClick={handleSaveCantidad}
-            variant="contained"
-            disabled={cantidadReal === "" || loading}
             fullWidth
+            variant="contained"
             size="large"
-            sx={{ minHeight: { xs: 48, sm: 42 } }}
+            disabled={cantidadReal === "" || loading}
+            onClick={handleSaveCantidad}
+            sx={{ minHeight: 48 }}
           >
-            {modoSuma ? "Agregar" : "Guardar"}
+            {modoSuma ? "Sumar" : "Guardar"}
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      <Dialog open={openFinalizeDialog} onClose={() => !loading && setOpenFinalizeDialog(false)} fullWidth maxWidth="sm" fullScreen={isXs}>
+        <DialogTitle sx={{ fontWeight: 700 }}>Finalizar conteo</DialogTitle>
+        <DialogContent>
+          {productosPendientes > 0 ? (
+            <Alert severity="warning" sx={{ mb: 2 }}>
+              Quedan <strong>{productosPendientes}</strong> productos sin cantidad. Igual podés finalizar si corresponde.
+            </Alert>
+          ) : (
+            <Alert severity="success" sx={{ mb: 2 }}>
+              Todos los ítems tienen cantidad registrada.
+            </Alert>
+          )}
+          <Typography variant="body2" color="text.secondary">
+            El conteo pasará a historial como finalizado.
+          </Typography>
+        </DialogContent>
+        <DialogActions sx={{ p: 2, gap: 1, flexDirection: "column" }}>
+          <Button variant="contained" color="success" fullWidth size="large" disabled={loading} onClick={handleFinalizarConteo} sx={{ minHeight: 48 }}>
+            Confirmar finalización
+          </Button>
+          <Button variant="outlined" fullWidth size="large" disabled={loading} onClick={() => setOpenFinalizeDialog(false)} sx={{ minHeight: 48 }}>
+            Volver
           </Button>
         </DialogActions>
       </Dialog>
 
       <Snackbar
         open={snackbar.open}
-        autoHideDuration={3000}
-        onClose={() => setSnackbar({ ...snackbar, open: false })}
+        autoHideDuration={3200}
+        onClose={() => setSnackbar((s) => ({ ...s, open: false }))}
         anchorOrigin={{ vertical: "bottom", horizontal: "center" }}
       >
-        <Alert
-          onClose={() => setSnackbar({ ...snackbar, open: false })}
-          severity={snackbar.severity}
-          sx={{ width: "100%" }}
-        >
+        <Alert severity={snackbar.severity} variant="filled" onClose={() => setSnackbar((s) => ({ ...s, open: false }))} sx={{ width: "100%" }}>
           {snackbar.message}
         </Alert>
       </Snackbar>

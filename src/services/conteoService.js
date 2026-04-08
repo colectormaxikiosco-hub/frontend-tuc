@@ -17,9 +17,7 @@ export const conteoService = {
   // Obtener conteo por ID - GET /api/conteos/:id
   getById: async (id) => {
     try {
-      console.log("[v0] Obteniendo conteo por ID:", id)
       const response = await api.get(`/conteos/${id}`)
-      console.log("[v0] Conteo obtenido:", response.data.data)
       return response.data.data
     } catch (error) {
       console.error("[v0] Error obteniendo conteo:", error)
