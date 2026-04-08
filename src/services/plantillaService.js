@@ -113,46 +113,15 @@ export const plantillaService = {
 
   update: async (id, plantilla) => {
     try {
-      // Actualizar datos básicos de la plantilla
-      await api.put(`/plantillas/${id}`, {
+      const response = await api.put(`/plantillas/${id}/completo`, {
         nombre: plantilla.nombre,
-        descripcion: plantilla.descripcion,
+        descripcion: plantilla.descripcion ?? "",
+        productos: (plantilla.productos || []).map((p) => ({
+          producto_id: p.productoId,
+          cantidad_deseada: p.cantidadDeseada,
+        })),
       })
-
-      // Obtener productos actuales
-      const currentPlantilla = await api.get(`/plantillas/${id}`)
-      const currentProductos = currentPlantilla.data.data.productos || []
-
-      // Eliminar productos que ya no están
-      for (const currentProd of currentProductos) {
-        const exists = plantilla.productos.find((p) => p.productoId === currentProd.producto_id)
-        if (!exists) {
-          await api.delete(`/plantillas/${id}/productos/${currentProd.producto_id}`)
-        }
-      }
-
-      // Agregar o actualizar productos
-      if (plantilla.productos && plantilla.productos.length > 0) {
-        for (const producto of plantilla.productos) {
-          const exists = currentProductos.find((p) => p.producto_id === producto.productoId)
-          if (exists) {
-            // Actualizar cantidad
-            await api.put(`/plantillas/${id}/productos/${producto.productoId}`, {
-              cantidad_deseada: producto.cantidadDeseada,
-            })
-          } else {
-            // Agregar nuevo producto
-            await api.post(`/plantillas/${id}/productos`, {
-              producto_id: producto.productoId,
-              cantidad_deseada: producto.cantidadDeseada,
-            })
-          }
-        }
-      }
-
-      // Obtener la plantilla completa actualizada
-      const updatedPlantilla = await api.get(`/plantillas/${id}`)
-      return updatedPlantilla.data.data
+      return response.data.data
     } catch (error) {
       console.error("[v0] Error actualizando plantilla:", error)
       throw error
